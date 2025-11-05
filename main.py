@@ -1,8 +1,15 @@
 import os
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+import smtplib
+from email.message import EmailMessage
+from typing import Optional
 
-app = FastAPI()
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, EmailStr, Field
+
+from database import create_document
+
+app = FastAPI(title="Ananda Fadhilah Portfolio API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -12,13 +19,67 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+class ContactRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=100)
+    email: EmailStr
+    subject: Optional[str] = Field(None, max_length=150)
+    message: str = Field(..., min_length=10, max_length=5000)
+
+
 @app.get("/")
 def read_root():
-    return {"message": "Hello from FastAPI Backend!"}
+    return {"message": "Portfolio backend running"}
 
-@app.get("/api/hello")
-def hello():
-    return {"message": "Hello from the backend API!"}
+
+@app.post("/contact")
+def submit_contact(payload: ContactRequest):
+    # Store message in database
+    try:
+        doc_id = create_document("contactmessage", payload.model_dump())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)[:200]}")
+
+    # Try to send email if SMTP is configured
+    smtp_host = os.getenv("SMTP_HOST")
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_user = os.getenv("SMTP_USER")
+    smtp_pass = os.getenv("SMTP_PASS")
+    to_email = os.getenv("TO_EMAIL") or os.getenv("OWNER_EMAIL")
+
+    sent = False
+    send_error = None
+    if smtp_host and smtp_user and smtp_pass and to_email:
+        try:
+            msg = EmailMessage()
+            msg["Subject"] = payload.subject or f"New Portfolio Inquiry from {payload.name}"
+            msg["From"] = smtp_user
+            msg["To"] = to_email
+            msg.set_content(
+                f"Name: {payload.name}\n"
+                f"Email: {payload.email}\n"
+                f"Subject: {payload.subject or 'N/A'}\n\n"
+                f"Message:\n{payload.message}\n\n"
+                f"Document ID: {doc_id}\n"
+            )
+
+            with smtplib.SMTP(smtp_host, smtp_port) as server:
+                server.starttls()
+                server.login(smtp_user, smtp_pass)
+                server.send_message(msg)
+                sent = True
+        except Exception as e:
+            send_error = str(e)
+
+    return {
+        "ok": True,
+        "stored_id": doc_id,
+        "email_sent": sent,
+        "note": None if sent else (
+            "Email not sent (SMTP not configured)" if not send_error and not sent else f"Email send failed: {send_error}"
+        ),
+    }
+
 
 @app.get("/test")
 def test_database():
